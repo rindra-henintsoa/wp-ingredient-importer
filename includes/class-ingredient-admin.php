@@ -62,6 +62,11 @@ class Ingredient_Admin {
             wp_mkdir_p( $base );
         }
 
+        if (isset($_GET['preview']) && $_GET['preview'] == 1) {
+            $this->preview_import_content();
+            return;
+        }
+
         ?>
         <div class="wrap">
             <h1>Importer des fiches ingrédients</h1>
@@ -76,13 +81,18 @@ class Ingredient_Admin {
                     <tr>
                         <th scope="row">Mode</th>
                         <td>
-                            <label><input type="radio" name="import_mode" value="simulate" checked> Simuler (preview)</label><br>
+                            <label><input type="radio" name="import_mode" value="simulate" checked> Simuler (Aperçu)</label><br>
                             <label><input type="radio" name="import_mode" value="execute"> Exécuter</label>
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row">Batch size</th>
-                        <td><input type="number" name="batch_size" value="500" min="10" max="5000"></td>
+                        <th scope="row">
+                            <label for="batch_size">Nombre de lignes traitées à la fois</label>
+                        </th>
+                        <td>
+                            <input type="number" name="batch_size" id="batch_size" value="500" min="10" max="5000">
+                            <p class="description">Réglage avancé — laissez 500 si vous n’êtes pas sûr.</p>
+                        </td>
                     </tr>
                 </table>
                 <?php submit_button( 'Lancer l\'import' ); ?>
@@ -143,6 +153,13 @@ class Ingredient_Admin {
         }
 
         $isvalid = $this->plugin->import->validate_required_columns( $destination );
+
+        // Nettoyage automatique : garder 3 fichiers max dans /ingredient-imports
+        $this->cleanup_uploaded_files($base, 3);
+
+        // Nettoyage automatique dans /processed si nécessaire
+        $processed_dir = $base . '/processed';
+        $this->cleanup_uploaded_files($processed_dir, 3);
         
         if ( ! $isvalid  ) {
 
@@ -160,6 +177,23 @@ class Ingredient_Admin {
             wp_redirect( $redirect );
             exit;
         }
+
+        // If simulate, do a quick preview synchronously
+        $mode = sanitize_text_field( $_POST['import_mode'] ?? 'simulate' );
+        $batch_size = intval( $_POST['batch_size'] ?? 500 );
+
+        if ( $mode === 'simulate' ) 
+        {
+
+            $preview = $this->plugin->import->preview_file( $destination );
+        
+            set_transient('ingredient_import_preview', $preview, 60);
+
+            wp_redirect(
+                admin_url('edit.php?post_type=ingredient_fiche&page=ingredient_fiches_import&preview=1')
+            );
+            exit;
+        }        
 
         global $wpdb;
         $now = current_time( 'mysql' );
@@ -179,23 +213,6 @@ class Ingredient_Admin {
         ], [ '%s','%s','%d','%d','%d','%d','%d','%s','%s','%s','%d' ] );
 
         $log_id = $wpdb->insert_id;
-
-        // If simulate, do a quick preview synchronously
-        $mode = sanitize_text_field( $_POST['import_mode'] ?? 'simulate' );
-        $batch_size = intval( $_POST['batch_size'] ?? 500 );
-
-        if ( $mode === 'simulate' ) {
-            $preview = $this->plugin->import->preview_file( $destination );
-            // Show preview (simple)
-            echo '<div class="wrap"><h1>Preview import</h1>';
-            echo '<p>Fichier: ' . esc_html( $file['name'] ) . '</p>';
-            echo '<pre style="white-space:pre-wrap;border:1px solid #ddd;padding:12px;">';
-            echo esc_html( print_r( $preview, true ) );
-            echo '</pre>';
-            echo '<p><a href="' . esc_url( admin_url( 'admin.php?page=ingredient_fiches_import' ) ) . '">Retour</a></p>';
-            echo '</div>';
-            exit;
-        }
 
         // For real execution: mark running and process via cron immediate schedule to avoid timeout.
         $wpdb->update( $this->plugin->log_table, [ 'status' => 'running', 'started_at' => current_time( 'mysql' ) ], [ 'id' => $log_id ] );
@@ -295,6 +312,95 @@ class Ingredient_Admin {
         echo '<input type="text" readonly class="widefat"
                value="' . esc_attr($reference) . '" 
                style="background:#f5f5f5;color:#444;">';
+    }
+
+    public function cleanup_uploaded_files($directory, $max_files = 3) {
+
+        if (!is_dir($directory)) {
+            return;
+        }
+    
+        // Liste tous les fichiers du dossier
+        $files = array_diff(scandir($directory), ['.', '..']);
+    
+        // Garde seulement les fichiers (exclut les dossiers)
+        $files = array_filter($files, function($file) use ($directory) {
+            return is_file($directory . '/' . $file);
+        });
+    
+        // Si 3 fichiers ou moins → rien à faire
+        if (count($files) <= $max_files) {
+            return;
+        }
+    
+        // Trie par date : plus anciens en premier
+        usort($files, function($a, $b) use ($directory) {
+            return filemtime($directory . '/' . $a) <=> filemtime($directory . '/' . $b);
+        });
+    
+        // Fichiers à supprimer
+        $files_to_delete = array_slice($files, 0, count($files) - $max_files);
+    
+        foreach ($files_to_delete as $file) {
+            @unlink($directory . '/' . $file);
+        }
+    } 
+    
+    public function preview_import_content() {
+        $preview = get_transient('ingredient_import_preview');
+    
+        echo '<div class="wrap"><h1>Prévisualisation de l\'import</h1>';
+        
+        echo '<div style="text-align:right; margin-bottom:15px;">';
+        echo '<a href="' . esc_url(admin_url('admin.php?page=ingredient_fiches_import')) . '" class="button button-secondary">← Retour à l’import</a>';
+        echo '</div>';
+
+        if (empty($preview)) {
+            echo '<div class="notice notice-error"><p>Aucune donnée à afficher.</p></div>';
+            echo '</div>';
+            return;
+        }
+    
+        echo '<p>Voici un aperçu du fichier importé :</p>';
+    
+        // S'il existe au moins une ligne
+        $first_row = reset($preview);
+
+        // Récupère les noms de colonnes
+        $columns = array_keys($first_row);
+
+        // Réindexation propre de chaque ligne pour virer les index 0,1,2,...
+        $clean_preview = [];
+        foreach ($preview as $row) {
+            $new_row = [];
+            foreach ($columns as $i => $col_name) {
+                $new_row[$col_name] = $row[$i] ?? ''; // évite undefined index
+            }
+            $clean_preview[] = $new_row;
+        }
+
+        // On remplace l’aperçu par la version nettoyée
+        $preview = $clean_preview;
+
+        echo '<table class="wp-list-table widefat fixed striped">';
+
+        // En-têtes
+        echo '<thead><tr>';
+        foreach ($columns as $col) {
+            echo '<th>' . esc_html($col) . '</th>';
+        }
+        echo '</tr></thead>';
+
+        echo '<tbody>';
+        foreach ($preview as $row) {
+            echo '<tr>';
+            foreach ($row as $value) {
+                echo '<td>' . esc_html($value) . '</td>';
+            }
+            echo '</tr>';
+        }
+        echo '</tbody>';
+        echo '</table>';
     }
     
 }
