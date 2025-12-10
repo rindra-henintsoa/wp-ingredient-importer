@@ -13,6 +13,7 @@ class Ingredient_Admin {
         add_filter('views_edit-ingredient_fiche', [$this, 'add_import_button_to_cpt_list']);
         add_action('current_screen', [ $this, 'maybe_load_metabox' ]);
         add_action( 'admin_notices', [$this, 'unsupported_file_import_error']);
+        add_action( 'admin_init', [ $this, 'handle_delete_log' ] );
     }
 
     public function admin_menu() {
@@ -75,7 +76,7 @@ class Ingredient_Admin {
                 <input type="hidden" name="action" value="ingredient_import">
                 <table class="form-table">
                     <tr>
-                        <th scope="row"><label for="ingredient_file">Fichier (.xlsx, .xls, .csv)</label></th>
+                        <th scope="row"><label for="ingredient_file">Fichier (.xlsx, .xls)</label></th>
                         <td><input type="file" name="ingredient_file" id="ingredient_file" required></td>
                     </tr>
                     <tr>
@@ -103,21 +104,76 @@ class Ingredient_Admin {
     public function admin_history_page() { 
         global $wpdb;
 
-        $rows = $wpdb->get_results( "SELECT * FROM {$this->plugin->log_table} ORDER BY id DESC LIMIT 100" );
-        ;
-        echo '<div class="wrap"><h1>Historique des imports</h1><table class="wp-list-table history-import-content widefat fixed striped"><thead><tr><th>ID</th><th>Fichier</th><th>Lignes</th><th>Inséré</th><th>Mis à jour</th><th>Date</th></tr></thead><tbody>';
-        foreach ( $rows as $r ) {
+        $rows = $wpdb->get_results("SELECT * FROM {$this->plugin->log_table} ORDER BY id DESC LIMIT 100");
+
+        echo '<div class="wrap"><h1>Historique des imports</h1>';
+
+        if ( isset($_GET['deleted']) ) {
+            echo '<div class="notice notice-success is-dismissible"><p>Entrée supprimée avec succès.</p></div>';
+        }
+
+        echo '<table class="wp-list-table widefat fixed striped">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Fichier</th>
+                    <th>Lignes</th>
+                    <th>Inséré</th>
+                    <th>Mis à jour</th>
+                    <th>Date</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>';
+
+        foreach ($rows as $r) {
+
+            $delete_url = wp_nonce_url(
+                add_query_arg(
+                    ['delete_log' => $r->id],
+                    admin_url('admin.php?page=ingredient_fiches_history')
+                ),
+                'delete_log_' . $r->id
+            );
+
             echo '<tr>';
-            echo '<td>' . esc_html( $r->id ) . '</td>';
-            echo '<td>' . esc_html( $r->file_name ) . '</td>';
-            echo '<td>' . esc_html( $r->rows_processed ) . '</td>';
-            echo '<td>' . esc_html( $r->inserted ) . '</td>';
-            echo '<td>' . esc_html( $r->updated ) . '</td>';
-            echo '<td>' . esc_html( $r->finished_at ) . '</td>';
+            echo '<td>' . esc_html($r->id) . '</td>';
+            echo '<td>' . esc_html($r->file_name) . '</td>';
+            echo '<td>' . esc_html($r->rows_processed) . '</td>';
+            echo '<td>' . esc_html($r->inserted) . '</td>';
+            echo '<td>' . esc_html($r->updated) . '</td>';
+            echo '<td>' . esc_html($r->finished_at) . '</td>';
+            echo '<td><a href="'.esc_url($delete_url).'" class="button button-small button-danger"
+                    onclick="return confirm(\'Confirmer la suppression ?\')">Supprimer</a></td>';
             echo '</tr>';
         }
+
         echo '</tbody></table></div>';
     }
+
+    public function handle_delete_log() {
+        global $wpdb;
+    
+        if (
+            isset($_GET['page'], $_GET['delete_log'], $_GET['_wpnonce']) &&
+            $_GET['page'] === 'ingredient_fiches_history' &&
+            wp_verify_nonce($_GET['_wpnonce'], 'delete_log_' . $_GET['delete_log'])
+        ) {
+    
+            $log_id = intval($_GET['delete_log']);
+    
+            // Suppression dans la base
+            $wpdb->delete($this->plugin->log_table, ['id' => $log_id], ['%d']);
+    
+            // Redirection propre sans erreur
+            wp_redirect(
+                admin_url('admin.php?page=ingredient_fiches_history&deleted=1')
+            );
+            exit;
+        }
+    }
+    
+    
     public function handle_upload_post() { 
         if ( ! current_user_can( 'manage_options' ) ) {
             wp_die( 'Unauthorized' );
@@ -130,7 +186,7 @@ class Ingredient_Admin {
         }
 
         $file = $_FILES['ingredient_file'];
-        $allowed = [ 'xlsx', 'xls', 'csv' ];
+        $allowed = [ 'xlsx', 'xls'];
         $file_ext = strtolower( pathinfo( $file['name'], PATHINFO_EXTENSION ) );
         if ( ! in_array( $file_ext, $allowed, true ) ) {
             $redirect_url = add_query_arg(
@@ -243,7 +299,7 @@ class Ingredient_Admin {
         if ( isset( $_GET['import_error'] ) && $_GET['import_error'] === 'format' ) {
             ?>
             <div class="notice notice-error is-dismissible">
-                <p><strong>Erreur :</strong> Format non supporté. Veuillez importer un fichier XLSX, XLS ou CSV.</p>
+                <p><strong>Erreur :</strong> Format non supporté. Veuillez importer un fichier XLSX ou XLS.</p>
             </div>
             <?php
         }
